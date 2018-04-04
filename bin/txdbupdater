@@ -1,0 +1,115 @@
+#!/usr/bin/env node
+
+const level = require('level')
+const Web3 = require('web3');
+var sleep = require('sleep');
+
+const db = level('./data/txdb')
+
+var web3 = new Web3();
+web3.setProvider(new Web3.providers.HttpProvider("http://localhost:18545"));
+
+let lastDbBlock
+let lastBlockchainBlock
+
+const appendAddress = async(addr,tx,inout) => {
+
+    const txPerAddrPrefix = addr+"-"+inout+"-"
+    const txPerAddrIndexKey = addr+"-"+inout
+
+    let lastIndex = 0
+    let lastTxList = []
+    try {
+        lastIndex = await db.get(txPerAddrIndexKey)
+        lastTxList = await db.get(txPerAddrPrefix+lastIndex)
+    } catch (err) {
+    }
+
+    if (lastTxList.length > 128) {
+        lastIndex++
+        await db.put(txPerAddrIndexKey,lastIndex)
+        lastTxList = []
+    }
+
+    lastTxList.push(tx)
+    await db.put(txPerAddrPrefix+lastIndex,lastTxList)
+}
+
+const appendLastTxs = async(tx) => {
+
+    const lastTxKey = "lasttx"
+
+    let lastTxList = []
+    try {
+        lastTxList = await db.get(lastTxKey)
+    } catch (err) {
+    }
+
+    if (lastTxList.length > 128) {
+        lastTxList = lastTxList.slice(-1)
+    }
+    
+    txinfo = {
+        hash : tx.hash,
+        from : tx.from,
+        to : tx.to,
+        value : tx.value.toString(16)
+    }
+
+    lastTxList = [JSON.stringify(txinfo),...lastTxList]
+
+    console.log(lastTxList)
+
+
+    await db.put(lastTxKey,lastTxList)
+}
+
+const syncDb = async () => {
+
+    let lastBlock
+
+    try {
+        lastDbBlock = await db.get('lastblock')
+    } catch (err) {
+        console.log("Initializing...")
+        await db.put('lastblock',0)
+        lastDbBlock = await db.get('lastblock')
+    }
+
+    while (true) {
+
+        lastBlockchainBlock = await web3.eth.getBlockNumber()
+
+        console.log('last block            :',lastDbBlock);
+        console.log('last blockchain block :', lastBlockchainBlock)
+        
+        while (lastDbBlock <= lastBlockchainBlock) {
+            const block = await web3.eth.getBlock(lastDbBlock,false)
+
+            if (block.transactions.length > 0) {
+                console.log("Block ",lastDbBlock, " with ", block.transactions.length, " txn")
+            }
+
+            queries = []
+            for (txn=0;txn<block.transactions.length;txn++) {
+                const txid = block.transactions[txn]
+                queries.push(web3.eth.getTransaction(txid))
+            }
+
+            for (txn=0;txn<queries.length;txn++) {
+                const tx = await queries[txn]
+                appendAddress(tx.from,tx.hash,"from")    
+                appendAddress(tx.to,tx.hash,"to")
+                appendLastTxs(tx)    
+            }
+
+            lastDbBlock++
+            await db.put('lastblock',lastDbBlock)
+        }
+
+        sleep.sleep(5)
+
+    }
+}
+   
+syncDb();
